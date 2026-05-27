@@ -1,0 +1,6 @@
+raw/
+data/
+analysis/final/
+analysis/outputs/
+requirements_eda.txt
+*__pycache__/
