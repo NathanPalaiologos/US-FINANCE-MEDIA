@@ -1,96 +1,80 @@
-# TDM Studio Metadata EDA Pipeline
+# TDM Studio Partition-Aware Metadata EDA
 
-This project analyzes a ProQuest/TDM Studio metadata export for finance, economics, and business media.
+This project analyzes ten TDM Studio metadata partitions for U.S. business, finance, economics, and commercial media. The current pipeline treats `raw/*/master.csv` as the canonical input because it contains the full 31-column metadata schema.
 
-## What the Pipeline Does
+## Scope
 
-1. Reads the nested TDM Studio ZIP export from `raw/`.
-2. Audits the available CSV columns and candidate XML paths for title, genre/source type, full-text availability, journal/publication, date range, coverage proxies, authors, and topic metadata.
-3. Uses `extended.csv` as the main metadata table when XML files are not present locally.
-4. Normalizes publication titles and publisher locations.
-5. Retains North-American publishers for the main media scope.
-6. Builds a submission-ready cleaned dataset containing English documents only.
-7. Builds a document-level metadata panel for exploration and topic-modeling sensitivity checks.
-8. Marks conservative duplicate candidates using normalized title + date + normalized publication.
-9. Produces summary tables, issue/topic coverage tables, visualizations, a notebook, and reports.
-10. Runs title-based topic modeling on the cleaned English North-American metadata only.
+- Unit of observation: one TDM metadata document row.
+- Primary key: `GOID`.
+- Primary tidy sample: English records from the U.S. query corpus.
+- Publisher geography is a diagnostic, not a sample filter.
+- The local export contains metadata only, not full article body text.
 
-## Important Limits of the Source Metadata
+## Commands
 
-- The export does not contain full article text.
-- The current local CSV export does not contain a full-text-online availability field. The upgraded XML manifest records candidate XML tags to scan if XML exports are added.
-- The export does not contain serial issue or volume fields.
-- `Subject Terms` and `Class Terms` support topical issue coverage analysis, but they cannot prove whether every issue of a serial publication is present.
+Create and activate the recommended Windows virtual environment:
 
-## Main Commands
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements_eda.txt
+```
 
-Install dependencies:
+Register the notebook kernel used by the raw-first EDA workbook:
+
+```powershell
+python -m ipykernel install --user --name tdm-studio-eda --display-name "TDM Studio (.venv)"
+```
+
+Install dependencies into an existing environment:
 
 ```powershell
 python -m pip install -r requirements_eda.txt
-python -m ipykernel install --user --name tdm-studio-python --display-name "TDM Studio Python"
 ```
 
-Run the full heavy pipeline:
+The notebook builder writes `analysis/deliverable/notebooks/tdm_corpus_raw_eda_workbook.ipynb` with the `tdm-studio-eda` kernel by default. If you need a different kernel identity, set `TDM_KERNEL_NAME` and `TDM_KERNEL_DISPLAY` before running `scripts\build_metadata_eda_notebook.py`.
+
+Run focused tests:
+
+```powershell
+python -m unittest discover -s tests
+```
+
+Run the full pipeline:
 
 ```powershell
 $env:PYTHONIOENCODING='utf-8'
-@'
-from pathlib import Path
-import sys
-sys.path.insert(0, str(Path('scripts').resolve()))
-from eda_helpers import profile_metadata, build_cleaned_metadata_outputs, run_topic_modeling, make_plots, write_final_summary_workbook, write_report
-from eda_helpers import scan_xml_field_inventory, build_metadata_panel_outputs
-
-scan_xml_field_inventory()
-profile_metadata()
-build_cleaned_metadata_outputs()
-build_metadata_panel_outputs()
-run_topic_modeling()
-make_plots()
-write_final_summary_workbook()
-write_report()
-'@ | python -
+python scripts\partition_pipeline.py
 ```
 
-Refresh the reading notebook after outputs already exist:
+Create the raw-first EDA workbook:
 
 ```powershell
 python scripts\build_metadata_eda_notebook.py
 ```
 
-## Final Deliverables
+Curate the output tree and remove intermediate clutter:
 
-Use `analysis/final/` for submission-ready files:
+```powershell
+python scripts\curate_deliverables.py
+```
 
-- `summary_statistics_final.xlsx`
-- `cleaned_metadata_english_north_america.parquet`
-- `cleaned_metadata_english_north_america.csv.zip`
-- `cleaned_metadata_english_north_america_dedup.parquet`
-- `cleaned_metadata_english_north_america_dedup.csv.zip`
-- `cleaned_metadata_data_dictionary.csv`
-- `metadata_field_audit.csv`
-- `metadata_panel.parquet`
-- `metadata_panel.csv.zip`
-- `metadata_panel_data_dictionary.csv`
-- `metadata_export_manifest.csv`
-- `mentor_email_draft.md`
+## Curated Output
 
-Reports and notebook:
+The useful deliverables live under `analysis/deliverable/`:
 
-- `analysis/metadata_panel_topic_modeling_workflow.ipynb`
-- `analysis/metadata_quality_report.md`
-- `analysis/metadata_quality_report.pdf`
+- `data/`: full row-level parquet/CSV exports and compact document NLP scores.
+- `csv/`: compact summary and audit tables.
+- `reports/`: summary workbook, markdown report, and figures. No PDF report is kept.
+- `memory/`: run summary, validation, data dictionary, manifest, and processing notes.
+- `notebooks/`: standalone raw-first EDA workbook.
 
-## Current Cleaned Dataset Scope
+## Important Limits
 
-- Language: English only.
-- Publisher region: United States or Canada.
-- Publication/location fields: normalized and disambiguated.
-- Deduplication: conservative title/date/media key is included; a deduplicated export is provided separately.
-
-## Notes for Maintenance
-
-- `analysis/outputs/` contains detailed intermediate outputs.
-- `analysis/final/` contains the files intended for sharing/submission.
-- If `summary_statistics.xlsx` is open in Excel, Windows may lock it. The pipeline records this as a processing note rather than hiding the issue.
+- Topic and sentiment analysis are metadata/title based.
+- The raw-first notebook now builds grouped word clouds from the full English corpus with usable metadata text, while NMF and LDA topic models still fit on a bounded metadata sample for runtime reasons.
+- The main NLP text is `Title + Subject Terms + Class Terms`; title-only sensitivity scores are stored in the full tidy export.
+- Loughran-McDonald sentiment uses the official SRAF/Notre Dame dictionary source.
+- Fuzzy publication alias matches are audit suggestions only.
+- The saved manifest records 955,690 rows for the 2013-2026 trade-journal partition, while the local export contains 955,594 rows.

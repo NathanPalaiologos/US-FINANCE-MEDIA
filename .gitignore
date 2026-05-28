@@ -1,6 +1,8 @@
 raw/
 data/
-analysis/final/
-analysis/outputs/
 requirements_eda.txt
 *__pycache__/
+.venv/
+analysis/deliverable/csv/
+analysis/deliverable/memory/
+tests/
