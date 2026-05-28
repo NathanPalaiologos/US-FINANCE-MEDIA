@@ -632,6 +632,14 @@ def score_texts(texts: pd.Series, lexicon: dict[str, set[str]]) -> pd.DataFrame:
     return pd.DataFrame(rows, index=texts.index)
 
 
+def build_sentiment_lookup(lexicon: dict[str, set[str]]) -> dict[str, tuple[str, ...]]:
+    lookup: defaultdict[str, list[str]] = defaultdict(list)
+    for category, words in lexicon.items():
+        for word in words:
+            lookup[word].append(category)
+    return {word: tuple(categories) for word, categories in lookup.items()}
+
+
 def wordcloud_tokens(text: str, stop_words: set[str] | None = None) -> list[str]:
     blocked = stop_words or WORDCLOUD_STOPWORD_TOKENS
     return [
@@ -655,6 +663,28 @@ def update_group_term_counters(
     combined_text = frame.groupby("group", dropna=False)["text"].agg(" ".join)
     for group_value, group_text in combined_text.items():
         counters[group_value].update(wordcloud_tokens(group_text, stop_words=blocked))
+
+
+def update_group_sentiment_totals(
+    texts: pd.Series,
+    groups: pd.Series,
+    totals: dict[object, Counter],
+    *,
+    sentiment_lookup: dict[str, tuple[str, ...]],
+) -> None:
+    frame = pd.DataFrame({"group": groups, "text": texts}).dropna(subset=["group"])
+    if frame.empty:
+        return
+    documents_by_group = frame.groupby("group", dropna=False).size()
+    combined_text = frame.groupby("group", dropna=False)["text"].agg(" ".join)
+    for group_value, group_text in combined_text.items():
+        token_counts = Counter(tokenize(group_text))
+        group_totals = totals[group_value]
+        group_totals["documents"] += int(documents_by_group.loc[group_value])
+        group_totals["lm_token_count"] += int(sum(token_counts.values()))
+        for token, token_count in token_counts.items():
+            for category in sentiment_lookup.get(token, ()): 
+                group_totals[f"lm_{category}"] += int(token_count)
 
 
 def top_terms_by_group(group_counters: dict[object, Counter], limit: int = 120) -> dict[object, dict[str, int]]:
@@ -735,7 +765,13 @@ def build_notebook_profile(
     invalid_dates = 0
     min_date = None
     max_date = None
+    sentiment_lookup = build_sentiment_lookup(load_lm_dictionary())
     wordcloud_group_counters = {
+        "decade": defaultdict(Counter),
+        "source_type": defaultdict(Counter),
+        "partition_family": defaultdict(Counter),
+    }
+    sentiment_group_totals = {
         "decade": defaultdict(Counter),
         "source_type": defaultdict(Counter),
         "partition_family": defaultdict(Counter),
@@ -832,6 +868,24 @@ def build_notebook_profile(
             update_group_term_counters(topic_base["topic_text"], topic_base["decade"].astype(object), wordcloud_group_counters["decade"])
             update_group_term_counters(topic_base["topic_text"], topic_base["Source Type"], wordcloud_group_counters["source_type"])
             update_group_term_counters(topic_base["topic_text"], topic_base["partition_family"], wordcloud_group_counters["partition_family"])
+            update_group_sentiment_totals(
+                topic_base["topic_text"],
+                topic_base["decade"].astype(object),
+                sentiment_group_totals["decade"],
+                sentiment_lookup=sentiment_lookup,
+            )
+            update_group_sentiment_totals(
+                topic_base["topic_text"],
+                topic_base["Source Type"],
+                sentiment_group_totals["source_type"],
+                sentiment_lookup=sentiment_lookup,
+            )
+            update_group_sentiment_totals(
+                topic_base["topic_text"],
+                topic_base["partition_family"],
+                sentiment_group_totals["partition_family"],
+                sentiment_lookup=sentiment_lookup,
+            )
 
             sampled = sample_rows_by_group(
                 topic_base.dropna(subset=["decade", "Source Type"]),
@@ -859,6 +913,14 @@ def build_notebook_profile(
     wordcloud_term_frequencies = {
         group_name: top_terms_by_group(group_counters, limit=wordcloud_term_limit)
         for group_name, group_counters in wordcloud_group_counters.items()
+    }
+    serialized_sentiment_group_totals = {
+        group_name: {
+            group_value: {metric: int(value) for metric, value in totals.items()}
+            for group_value, totals in group_totals.items()
+            if totals
+        }
+        for group_name, group_totals in sentiment_group_totals.items()
     }
 
     return {
@@ -888,6 +950,7 @@ def build_notebook_profile(
         "wordcloud_document_rows": int(sum(wordcloud_group_sizes["partition_family"].values())),
         "wordcloud_group_sizes": wordcloud_group_sizes,
         "wordcloud_term_frequencies": wordcloud_term_frequencies,
+        "sentiment_group_totals": serialized_sentiment_group_totals,
     }
 
 
