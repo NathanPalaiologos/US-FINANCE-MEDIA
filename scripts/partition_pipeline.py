@@ -38,6 +38,10 @@ MANIFEST_PATH = ANALYSIS_DIR / "tdm_dataset_partitions_manifest.csv"
 CURATED_MANIFEST_PATH = ANALYSIS_DIR / "deliverable" / "memory" / "tdm_dataset_partitions_manifest.csv"
 REPORT_PATH = ANALYSIS_DIR / "metadata_quality_report.md"
 REPORT_PDF_PATH = ANALYSIS_DIR / "metadata_quality_report.pdf"
+CLEAN_METADATA_FILE = "clean_metadata.parquet"
+FEATURE_METADATA_FILE = "metadata_topics_sentiment.parquet"
+CLEAN_METADATA_PATH = FINAL_DIR / CLEAN_METADATA_FILE
+FEATURE_METADATA_PATH = FINAL_DIR / FEATURE_METADATA_FILE
 
 MASTER_COLUMNS = [
     "GOID",
@@ -106,6 +110,81 @@ COLUMN_RENAMES = {
     "Company Name": "company_name",
     "Company NAIC": "company_naic",
 }
+
+CLEAN_METADATA_COLUMNS = list(COLUMN_RENAMES.values()) + [
+    "source_partition",
+    "partition_family",
+    "publication_date",
+    "year",
+    "decade",
+    "publisher_city_normalized",
+    "publisher_province_normalized",
+    "publisher_region",
+    "publisher_location_normalized",
+    "primary_author",
+    "author_count",
+    "subject_term_count",
+    "class_term_count",
+    "company_count",
+    "pages_numeric",
+]
+
+FEATURE_METADATA_COLUMNS = [
+    "goid",
+    "source_partition",
+    "partition_family",
+    "date",
+    "publication_date",
+    "year",
+    "decade",
+    "source_type",
+    "object_type",
+    "language",
+    "title_normalized",
+    "publication_title",
+    "publication_title_normalized",
+    "publication_title_canonical",
+    "publication_title_display",
+    "publication_id",
+    "publisher_name",
+    "publisher_city_normalized",
+    "publisher_province_normalized",
+    "publisher_region",
+    "publisher_location_normalized",
+    "primary_author",
+    "author_count",
+    "subject_term_count",
+    "class_term_count",
+    "company_count",
+    "pages_numeric",
+    "duplicate_goid",
+    "duplicate_exact_title_date_publication",
+    "duplicate_normalized_title_date_publication",
+    "duplicate_title_date",
+    "is_conservative_duplicate_extra",
+    "lm_token_count",
+    "lm_positive",
+    "lm_positive_rate",
+    "lm_negative",
+    "lm_negative_rate",
+    "lm_uncertainty",
+    "lm_uncertainty_rate",
+    "lm_litigious",
+    "lm_litigious_rate",
+    "lm_constraining",
+    "lm_constraining_rate",
+    "lm_strong_modal",
+    "lm_strong_modal_rate",
+    "lm_weak_modal",
+    "lm_weak_modal_rate",
+    "lm_net_tone",
+    "topic_id",
+    "topic_label",
+    "topic_weight",
+    "title_only_topic_id",
+    "title_only_topic_label",
+    "title_only_topic_weight",
+]
 
 PARTITION_DATASET_MAP = {
     "USBizNews18571913_metadata": "us_business_media__newspapers__1857_1913__fulltext_dedup",
@@ -756,6 +835,8 @@ def build_notebook_profile(
     publication_source_type_examples: defaultdict[str, Counter] = defaultdict(Counter)
     subject_counts = Counter()
     class_counts = Counter()
+    author_coverage_by_decade: defaultdict[int, Counter] = defaultdict(Counter)
+    author_coverage_by_decade_source: defaultdict[tuple[int, str], Counter] = defaultdict(Counter)
     goid_hashes: list[np.ndarray] = []
     normalized_hashes: list[np.ndarray] = []
     title_date_hashes: list[np.ndarray] = []
@@ -810,6 +891,28 @@ def build_notebook_profile(
             years = pd.to_datetime(english["Date"], errors="coerce").dt.year
             decades = ((years // 10) * 10).astype("Int64")
             year_counts.update(years.dropna().astype(int).value_counts().to_dict())
+            author_lists = english["Authors"].map(parse_list_like)
+            author_present = author_lists.map(len).gt(0)
+            author_counts = author_lists.map(len)
+            author_detail = pd.DataFrame(
+                {
+                    "decade": decades,
+                    "source_type": english["Source Type"].fillna("<missing>"),
+                    "author_present": author_present,
+                    "author_count": author_counts,
+                }
+            ).dropna(subset=["decade"])
+            for decade_value, group in author_detail.groupby("decade", dropna=False):
+                decade_key = int(decade_value)
+                author_coverage_by_decade[decade_key]["documents"] += int(len(group))
+                author_coverage_by_decade[decade_key]["documents_with_author"] += int(group["author_present"].sum())
+                author_coverage_by_decade[decade_key]["author_mentions"] += int(group["author_count"].sum())
+            for (decade_value, source_type), group in author_detail.groupby(["decade", "source_type"], dropna=False):
+                decade_key = int(decade_value)
+                source_key = str(source_type)
+                author_coverage_by_decade_source[(decade_key, source_key)]["documents"] += int(len(group))
+                author_coverage_by_decade_source[(decade_key, source_key)]["documents_with_author"] += int(group["author_present"].sum())
+                author_coverage_by_decade_source[(decade_key, source_key)]["author_mentions"] += int(group["author_count"].sum())
 
             normalized_publication = english["Publication Title"].map(normalize_publication)
             normalized_title = english["Title"].map(normalize_title)
@@ -942,6 +1045,14 @@ def build_notebook_profile(
         "publication_source_type_examples": publication_source_type_examples,
         "subject_counts": subject_counts,
         "class_counts": class_counts,
+        "author_coverage_by_decade": {
+            decade: {metric: int(value) for metric, value in totals.items()}
+            for decade, totals in author_coverage_by_decade.items()
+        },
+        "author_coverage_by_decade_source": {
+            f"{decade}|{source_type}": {metric: int(value) for metric, value in totals.items()}
+            for (decade, source_type), totals in author_coverage_by_decade_source.items()
+        },
         "goid_hashes": goid_hashes,
         "normalized_hashes": normalized_hashes,
         "title_date_hashes": title_date_hashes,
@@ -1333,7 +1444,7 @@ def assign_topics(texts: pd.Series, vectorizer: TfidfVectorizer, model: NMF, lab
     )
 
 
-def write_complete_metadata(
+def write_submission_datasets(
     partitions: list[PartitionInfo],
     profile: dict,
     vectorizer: TfidfVectorizer,
@@ -1342,9 +1453,8 @@ def write_complete_metadata(
     lexicon: dict[str, set[str]],
     chunksize: int,
 ) -> dict:
-    parquet_path = FINAL_DIR / "complete_metadata.parquet"
-    csv_zip_path = FINAL_DIR / "complete_metadata.csv.zip"
-    writer: pq.ParquetWriter | None = None
+    clean_writer: pq.ParquetWriter | None = None
+    feature_writer: pq.ParquetWriter | None = None
     seen_norm_hashes: set[int] = set()
     rows_written = 0
     duplicate_hash_arrays = {
@@ -1352,93 +1462,69 @@ def write_complete_metadata(
         for name, values in profile["duplicate_sets"].items()
     }
 
-    with zipfile.ZipFile(csv_zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-        with zf.open("complete_metadata.csv", "w", force_zip64=True) as raw_csv:
-            text_csv = io.TextIOWrapper(raw_csv, encoding="utf-8", newline="")
-            wrote_header = False
-            for partition, raw_chunk in iter_master_chunks(partitions, chunksize=chunksize):
-                df = prepare_chunk(raw_chunk, partition)
-                df = df[df["language"].eq("English")].copy()
-                if df.empty:
-                    continue
+    for partition, raw_chunk in iter_master_chunks(partitions, chunksize=chunksize):
+        df = prepare_chunk(raw_chunk, partition)
+        df = df[df["language"].eq("English")].copy()
+        if df.empty:
+            continue
 
-                goid_hash = hash_frame(df[["goid"]])
-                exact_hash = hash_frame(df[["title", "date", "publication_title"]])
-                norm_hash = hash_frame(df[["title_normalized", "date", "publication_title_normalized"]])
-                title_date_hash = hash_frame(df[["title_normalized", "date"]])
+        goid_hash = hash_frame(df[["goid"]])
+        exact_hash = hash_frame(df[["title", "date", "publication_title"]])
+        norm_hash = hash_frame(df[["title_normalized", "date", "publication_title_normalized"]])
+        title_date_hash = hash_frame(df[["title_normalized", "date"]])
 
-                df["duplicate_goid"] = np.isin(goid_hash, duplicate_hash_arrays["goid"])
-                df["duplicate_exact_title_date_publication"] = np.isin(exact_hash, duplicate_hash_arrays["exact"])
-                df["duplicate_normalized_title_date_publication"] = np.isin(norm_hash, duplicate_hash_arrays["normalized"])
-                df["duplicate_title_date"] = np.isin(title_date_hash, duplicate_hash_arrays["title_date"])
-                extras = []
-                for value in norm_hash:
-                    key = int(value)
-                    is_extra = key in seen_norm_hashes
-                    extras.append(is_extra)
-                    seen_norm_hashes.add(key)
-                df["is_conservative_duplicate_extra"] = extras
+        df["duplicate_goid"] = np.isin(goid_hash, duplicate_hash_arrays["goid"])
+        df["duplicate_exact_title_date_publication"] = np.isin(exact_hash, duplicate_hash_arrays["exact"])
+        df["duplicate_normalized_title_date_publication"] = np.isin(norm_hash, duplicate_hash_arrays["normalized"])
+        df["duplicate_title_date"] = np.isin(title_date_hash, duplicate_hash_arrays["title_date"])
+        extras = []
+        for value in norm_hash:
+            key = int(value)
+            is_extra = key in seen_norm_hashes
+            extras.append(is_extra)
+            seen_norm_hashes.add(key)
+        df["is_conservative_duplicate_extra"] = extras
 
-                nlp_text = pd.Series(
-                    [metadata_text(title, subject, cls) for title, subject, cls in zip(df["title"], df["subject_terms"], df["class_terms"])],
-                    index=df.index,
-                )
-                title_text = df["title"].fillna("").astype(str)
-                sentiment = score_texts(nlp_text, lexicon)
-                topics = assign_topics(nlp_text, vectorizer, topic_model, topic_labels)
-                title_topics = assign_topics(title_text, vectorizer, topic_model, topic_labels).rename(
-                    columns={
-                        "topic_id": "title_only_topic_id",
-                        "topic_label": "title_only_topic_label",
-                        "topic_weight": "title_only_topic_weight",
-                    }
-                )
-                df = pd.concat([df, sentiment, topics, title_topics], axis=1)
-                for text_col in df.select_dtypes(include=["object", "string"]).columns:
-                    df[text_col] = df[text_col].astype("string")
-                df["pages_numeric"] = pd.to_numeric(df["pages_numeric"], errors="coerce").astype("float64")
+        nlp_text = pd.Series(
+            [metadata_text(title, subject, cls) for title, subject, cls in zip(df["title"], df["subject_terms"], df["class_terms"])],
+            index=df.index,
+        )
+        title_text = df["title"].fillna("").astype(str)
+        sentiment = score_texts(nlp_text, lexicon)
+        topics = assign_topics(nlp_text, vectorizer, topic_model, topic_labels)
+        title_topics = assign_topics(title_text, vectorizer, topic_model, topic_labels).rename(
+            columns={
+                "topic_id": "title_only_topic_id",
+                "topic_label": "title_only_topic_label",
+                "topic_weight": "title_only_topic_weight",
+            }
+        )
+        df = pd.concat([df, sentiment, topics, title_topics], axis=1)
+        for text_col in df.select_dtypes(include=["object", "string"]).columns:
+            df[text_col] = df[text_col].astype("string")
+        df["pages_numeric"] = pd.to_numeric(df["pages_numeric"], errors="coerce").astype("float64")
 
-                table = pa.Table.from_pandas(df, preserve_index=False)
-                if writer is None:
-                    writer = pq.ParquetWriter(parquet_path, table.schema, compression="zstd")
-                writer.write_table(table)
-                df.to_csv(text_csv, index=False, header=not wrote_header)
-                wrote_header = True
-                rows_written += len(df)
-                print(f"wrote complete metadata through {partition.name}: {rows_written:,} English rows", flush=True)
-            text_csv.flush()
-    if writer is not None:
-        writer.close()
-    return {"complete_rows": rows_written, "complete_parquet": str(parquet_path), "complete_csv_zip": str(csv_zip_path)}
+        clean_table = pa.Table.from_pandas(df[CLEAN_METADATA_COLUMNS], preserve_index=False)
+        feature_table = pa.Table.from_pandas(df[FEATURE_METADATA_COLUMNS], preserve_index=False)
+        if clean_writer is None:
+            clean_writer = pq.ParquetWriter(CLEAN_METADATA_PATH, clean_table.schema, compression="zstd")
+        if feature_writer is None:
+            feature_writer = pq.ParquetWriter(FEATURE_METADATA_PATH, feature_table.schema, compression="zstd")
+        clean_writer.write_table(clean_table)
+        feature_writer.write_table(feature_table)
+        rows_written += len(df)
+        print(f"wrote submission datasets through {partition.name}: {rows_written:,} English rows", flush=True)
 
-
-def write_deduplicated_metadata() -> dict:
-    source_path = FINAL_DIR / "complete_metadata.parquet"
-    target_path = FINAL_DIR / "complete_metadata_dedup.parquet"
-    csv_zip_path = FINAL_DIR / "complete_metadata_dedup.csv.zip"
-    writer: pq.ParquetWriter | None = None
-    rows = 0
-    with zipfile.ZipFile(csv_zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-        with zf.open("complete_metadata_dedup.csv", "w", force_zip64=True) as raw_csv:
-            text_csv = io.TextIOWrapper(raw_csv, encoding="utf-8", newline="")
-            wrote_header = False
-            parquet = pq.ParquetFile(source_path)
-            for batch in parquet.iter_batches(batch_size=150_000):
-                df = batch.to_pandas()
-                df = df[~df["is_conservative_duplicate_extra"]].copy()
-                if df.empty:
-                    continue
-                table = pa.Table.from_pandas(df, preserve_index=False)
-                if writer is None:
-                    writer = pq.ParquetWriter(target_path, table.schema, compression="zstd")
-                writer.write_table(table)
-                df.to_csv(text_csv, index=False, header=not wrote_header)
-                wrote_header = True
-                rows += len(df)
-            text_csv.flush()
-    if writer is not None:
-        writer.close()
-    return {"deduplicated_rows": rows, "dedup_parquet": str(target_path), "dedup_csv_zip": str(csv_zip_path)}
+    if clean_writer is not None:
+        clean_writer.close()
+    if feature_writer is not None:
+        feature_writer.close()
+    return {
+        "clean_rows": rows_written,
+        "feature_rows": rows_written,
+        "clean_metadata_parquet": str(CLEAN_METADATA_PATH),
+        "feature_metadata_parquet": str(FEATURE_METADATA_PATH),
+    }
 
 
 def write_csv_zip_from_parquet(parquet_path: Path, zip_path: Path, member_name: str, batch_size: int = 150_000) -> int:
@@ -1474,7 +1560,7 @@ def write_media_summary(group_col: str = "publication_title_canonical") -> pd.Da
         "primary_author",
         "subject_term_count",
     ]
-    df = pd.read_parquet(FINAL_DIR / "complete_metadata.parquet", columns=list(dict.fromkeys(cols)))
+    df = pd.read_parquet(FEATURE_METADATA_PATH, columns=list(dict.fromkeys(cols)))
     grouped = (
         df.groupby(group_col, dropna=False)
         .agg(
@@ -1595,8 +1681,8 @@ def build_publication_canonical_map(media: pd.DataFrame, audit: pd.DataFrame) ->
 
 
 def apply_publication_canonicalization(canonical_map: dict[str, str]) -> None:
-    source_path = FINAL_DIR / "complete_metadata.parquet"
-    temp_path = FINAL_DIR / "complete_metadata.canonicalizing.parquet"
+    source_path = FEATURE_METADATA_PATH
+    temp_path = FINAL_DIR / f"{FEATURE_METADATA_FILE}.canonicalizing.parquet"
     writer: pq.ParquetWriter | None = None
     parquet = pq.ParquetFile(source_path)
     for batch in parquet.iter_batches(batch_size=150_000):
@@ -1611,7 +1697,6 @@ def apply_publication_canonicalization(canonical_map: dict[str, str]) -> None:
     if writer is not None:
         writer.close()
     temp_path.replace(source_path)
-    write_csv_zip_from_parquet(source_path, FINAL_DIR / "complete_metadata.csv.zip", "complete_metadata.csv")
 
 
 def write_topic_and_sentiment_summaries() -> None:
@@ -1633,7 +1718,7 @@ def write_topic_and_sentiment_summaries() -> None:
         "lm_constraining",
         "lm_net_tone",
     ]
-    df = pd.read_parquet(FINAL_DIR / "complete_metadata.parquet", columns=cols)
+    df = pd.read_parquet(FEATURE_METADATA_PATH, columns=cols)
     topic_counts = (
         df.groupby(["topic_id", "topic_label"], dropna=False)
         .size()
@@ -1672,14 +1757,11 @@ def write_topic_and_sentiment_summaries() -> None:
         .reset_index()
         .to_csv(OUTPUT_DIR / "sentiment_by_decade.csv", index=False)
     )
-    df[["goid", "topic_id", "topic_label", "topic_weight", "title_only_topic_id", "lm_net_tone"]].to_parquet(
-        FINAL_DIR / "document_nlp_scores.parquet", index=False
-    )
 
 
 def write_final_sample_counts() -> None:
     df = pd.read_parquet(
-        FINAL_DIR / "complete_metadata.parquet",
+        FEATURE_METADATA_PATH,
         columns=["source_type", "object_type", "publisher_region", "year", "decade"],
     )
     df["source_type"].value_counts(dropna=False).rename_axis("source_type").reset_index(name="documents").to_csv(
@@ -1701,6 +1783,8 @@ def write_final_sample_counts() -> None:
 
 def write_data_dictionaries() -> None:
     rows = [
+        ("clean_metadata.parquet", "Cleaned English document metadata export with original TDM fields renamed to snake_case plus parsed dates, publisher geography diagnostics, author counts, term counts, and page counts."),
+        ("metadata_topics_sentiment.parquet", "Document-level analytical feature export keyed by `goid`, including normalized titles, canonical publication titles, duplicate flags, NMF topic assignments, and Loughran-McDonald sentiment scores."),
         ("source_partition", "Raw TDM metadata partition directory."),
         ("partition_family", "Partition source family inferred from the export name."),
         ("goid", "TDM document identifier; primary document key."),
@@ -1711,18 +1795,16 @@ def write_data_dictionaries() -> None:
         ("publication_title_normalized", "Normalized publication title for grouping aliases."),
         ("publisher_region", "Publisher geography diagnostic; not used as the primary sample filter."),
         ("duplicate_normalized_title_date_publication", "True for rows in a duplicate group by normalized title, date, and publication."),
-        ("is_conservative_duplicate_extra", "True for rows dropped from the conservative deduplicated export."),
+        ("is_conservative_duplicate_extra", "True for extra rows under the conservative normalized title/date/publication duplicate rule."),
         ("topic_id", "NMF topic assigned from Title + Subject Terms + Class Terms."),
         ("title_only_topic_id", "Sensitivity topic assignment using title text only."),
         ("lm_net_tone", "Loughran-McDonald positive minus negative word count divided by LM token count."),
     ]
-    pd.DataFrame(rows, columns=["field", "definition"]).to_csv(FINAL_DIR / "complete_metadata_data_dictionary.csv", index=False)
+    pd.DataFrame(rows, columns=["field", "definition"]).to_csv(FINAL_DIR / "submission_data_dictionary.csv", index=False)
     pd.DataFrame(
         [
-            ("complete_metadata.parquet", "Primary English tidy metadata export with duplicate, sentiment, and topic diagnostics."),
-            ("complete_metadata.csv.zip", "Compressed CSV companion for access convenience."),
-            ("complete_metadata_dedup.parquet", "Conservative deduplicated version of complete_metadata."),
-            ("document_nlp_scores.parquet", "Compact document-level topic and LM sentiment scores."),
+            (CLEAN_METADATA_FILE, "Cleaned English document metadata export with original TDM fields preserved in normalized column names."),
+            (FEATURE_METADATA_FILE, "Document-level normalized title, duplicate, topic-model, and sentiment feature export keyed by `goid`."),
             ("summary_statistics_final.xlsx", "Professor-facing summary statistics workbook."),
         ],
         columns=["file", "description"],
@@ -1746,7 +1828,7 @@ def write_summary_workbook() -> None:
         "Topic Terms": pd.read_csv(OUTPUT_DIR / "topic_terms.csv"),
         "Sentiment Decade": pd.read_csv(OUTPUT_DIR / "sentiment_by_decade.csv"),
         "Alias Audit": pd.read_csv(OUTPUT_DIR / "publication_alias_fuzzy_audit.csv").head(200),
-        "Data Dictionary": pd.read_csv(FINAL_DIR / "complete_metadata_data_dictionary.csv"),
+        "Data Dictionary": pd.read_csv(FINAL_DIR / "submission_data_dictionary.csv"),
     }
     with pd.ExcelWriter(FINAL_DIR / "summary_statistics_final.xlsx", engine="openpyxl") as writer:
         for name, df in sheets.items():
@@ -1842,7 +1924,7 @@ def write_report(summary: dict) -> None:
         mismatch_rows.to_markdown(index=False) if len(mismatch_rows) else "No row-count mismatches against the manifest.",
         "",
         "## Data Quality",
-        "Duplicate flags are retained on the full tidy export. The deduplicated export drops only extra rows from the conservative normalized title/date/publication rule.",
+        "Duplicate flags are retained in the normalized feature export. I do not create a separate deduplicated submission file because the appropriate duplicate rule depends on the research question.",
         "",
         duplicates.to_markdown(index=False),
         "",
@@ -1867,10 +1949,10 @@ def write_report(summary: dict) -> None:
         sentiment.to_markdown(index=False),
         "",
         "## Deliverables",
-        f"- Complete metadata rows: {summary['complete_rows']:,}.",
-        f"- Deduplicated metadata rows: {summary['deduplicated_rows']:,}.",
-        "- Main export: `analysis/deliverable/data/complete_metadata.parquet`.",
-        "- Access copy: `analysis/deliverable/data/complete_metadata.csv.zip`.",
+        f"- Clean metadata rows: {summary['clean_rows']:,}.",
+        f"- Topic/sentiment feature rows: {summary['feature_rows']:,}.",
+        f"- Clean metadata export: `analysis/deliverable/data/{CLEAN_METADATA_FILE}`.",
+        f"- Topic/sentiment feature export: `analysis/deliverable/data/{FEATURE_METADATA_FILE}`.",
         "- Summary workbook: `analysis/deliverable/reports/summary_statistics_final.xlsx`.",
         "- Notebook: `analysis/deliverable/notebooks/tdm_corpus_raw_eda_workbook.ipynb`.",
         "",
@@ -1937,7 +2019,7 @@ def write_processing_notes(summary: dict) -> None:
         },
         {
             "timestamp": datetime.now().isoformat(timespec="seconds"),
-            "note": "During the first full run, complete_metadata.parquet finished successfully but CSV ZIP writing hit the standard ZIP size limit; outputs were resumed from the validated parquet with force_zip64=True.",
+            "note": "The submission data directory is intentionally split into two parquet files: cleaned document metadata and normalized topic/sentiment features.",
         },
         {
             "timestamp": datetime.now().isoformat(timespec="seconds"),
@@ -1961,27 +2043,25 @@ def write_processing_notes(summary: dict) -> None:
     (FINAL_DIR / "run_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
 
-def validate_outputs(expected_complete_rows: int) -> dict:
-    complete = FINAL_DIR / "complete_metadata.parquet"
-    dedup = FINAL_DIR / "complete_metadata_dedup.parquet"
-    if not complete.exists() or not dedup.exists():
-        raise FileNotFoundError("Expected final parquet outputs are missing.")
-    complete_meta = pq.ParquetFile(complete).metadata
-    dedup_meta = pq.ParquetFile(dedup).metadata
-    if complete_meta.num_rows != expected_complete_rows:
-        raise ValueError(f"Complete parquet row count {complete_meta.num_rows:,} != expected {expected_complete_rows:,}.")
-    with zipfile.ZipFile(FINAL_DIR / "complete_metadata.csv.zip") as zf:
-        csv_member = zf.namelist()[0]
-        with zf.open(csv_member) as f:
-            header = f.readline().decode("utf-8").strip().split(",")
+def validate_outputs(expected_rows: int) -> dict:
+    if not CLEAN_METADATA_PATH.exists() or not FEATURE_METADATA_PATH.exists():
+        raise FileNotFoundError("Expected submission parquet outputs are missing.")
+    clean_meta = pq.ParquetFile(CLEAN_METADATA_PATH).metadata
+    feature_parquet = pq.ParquetFile(FEATURE_METADATA_PATH)
+    feature_meta = feature_parquet.metadata
+    if clean_meta.num_rows != expected_rows:
+        raise ValueError(f"Clean metadata row count {clean_meta.num_rows:,} != expected {expected_rows:,}.")
+    if feature_meta.num_rows != expected_rows:
+        raise ValueError(f"Feature metadata row count {feature_meta.num_rows:,} != expected {expected_rows:,}.")
     required = {"goid", "source_partition", "publication_title_normalized", "topic_id", "lm_net_tone"}
-    if not required.issubset(set(header)):
-        raise ValueError(f"CSV header is missing required fields: {sorted(required - set(header))}")
+    feature_columns = set(feature_parquet.schema_arrow.names)
+    if not required.issubset(feature_columns):
+        raise ValueError(f"Feature parquet is missing required fields: {sorted(required - feature_columns)}")
     validation = {
-        "complete_rows": complete_meta.num_rows,
-        "deduplicated_rows": dedup_meta.num_rows,
-        "complete_columns": complete_meta.num_columns,
-        "csv_zip_readable": True,
+        "clean_rows": clean_meta.num_rows,
+        "feature_rows": feature_meta.num_rows,
+        "clean_columns": clean_meta.num_columns,
+        "feature_columns": feature_meta.num_columns,
         "required_columns_present": True,
     }
     (OUTPUT_DIR / "validation_summary.json").write_text(json.dumps(validation, indent=2), encoding="utf-8")
@@ -1998,18 +2078,17 @@ def run_partition_pipeline(chunksize: int = 150_000, sample_per_group_chunk: int
     profile = first_pass_profile(partitions, chunksize=chunksize, sample_per_group_chunk=sample_per_group_chunk)
     write_profile_tables(profile, partition_validation)
     vectorizer, topic_model, topic_labels = train_topic_model()
-    complete_summary = write_complete_metadata(partitions, profile, vectorizer, topic_model, topic_labels, lexicon, chunksize=chunksize)
+    submission_summary = write_submission_datasets(partitions, profile, vectorizer, topic_model, topic_labels, lexicon, chunksize=chunksize)
     pre_canonical_media = write_media_summary(group_col="publication_title_normalized")
     _, canonical_map = write_alias_audit(pre_canonical_media)
     apply_publication_canonicalization(canonical_map)
-    dedup_summary = write_deduplicated_metadata()
     write_final_sample_counts()
     write_media_summary()
     write_topic_and_sentiment_summaries()
     write_data_dictionaries()
     write_summary_workbook()
     make_plots()
-    summary = {**complete_summary, **dedup_summary, "raw_rows": profile["all_rows"], "english_rows": profile["english_rows"]}
+    summary = {**submission_summary, "raw_rows": profile["all_rows"], "english_rows": profile["english_rows"]}
     validation = validate_outputs(profile["english_rows"])
     summary.update(validation)
     write_report(summary)
@@ -2017,16 +2096,13 @@ def run_partition_pipeline(chunksize: int = 150_000, sample_per_group_chunk: int
     return summary
 
 
-def resume_from_complete_metadata() -> dict:
-    complete_path = FINAL_DIR / "complete_metadata.parquet"
-    if not complete_path.exists():
-        raise FileNotFoundError(f"Missing complete metadata parquet: {complete_path}")
-    complete_rows = pq.ParquetFile(complete_path).metadata.num_rows
-    write_csv_zip_from_parquet(complete_path, FINAL_DIR / "complete_metadata.csv.zip", "complete_metadata.csv")
+def resume_from_submission_datasets() -> dict:
+    if not CLEAN_METADATA_PATH.exists() or not FEATURE_METADATA_PATH.exists():
+        raise FileNotFoundError(f"Missing submission parquet outputs in {FINAL_DIR}")
+    feature_rows = pq.ParquetFile(FEATURE_METADATA_PATH).metadata.num_rows
     pre_canonical_media = write_media_summary(group_col="publication_title_normalized")
     _, canonical_map = write_alias_audit(pre_canonical_media)
     apply_publication_canonicalization(canonical_map)
-    dedup_summary = write_deduplicated_metadata()
     write_final_sample_counts()
     write_media_summary()
     write_topic_and_sentiment_summaries()
@@ -2036,12 +2112,12 @@ def resume_from_complete_metadata() -> dict:
     core = pd.read_csv(OUTPUT_DIR / "core_summary.csv")
     core_map = dict(zip(core["metric"], core["value"]))
     summary = {
-        "complete_rows": complete_rows,
-        "complete_parquet": str(complete_path),
-        "complete_csv_zip": str(FINAL_DIR / "complete_metadata.csv.zip"),
-        **dedup_summary,
+        "clean_rows": pq.ParquetFile(CLEAN_METADATA_PATH).metadata.num_rows,
+        "feature_rows": feature_rows,
+        "clean_metadata_parquet": str(CLEAN_METADATA_PATH),
+        "feature_metadata_parquet": str(FEATURE_METADATA_PATH),
         "raw_rows": int(core_map.get("raw_documents", 0)),
-        "english_rows": int(core_map.get("english_documents", complete_rows)),
+        "english_rows": int(core_map.get("english_documents", feature_rows)),
     }
     validation = validate_outputs(summary["english_rows"])
     summary.update(validation)
@@ -2051,7 +2127,7 @@ def resume_from_complete_metadata() -> dict:
 
 
 def main() -> None:
-    summary = resume_from_complete_metadata() if "--resume-from-complete" in sys.argv else run_partition_pipeline()
+    summary = resume_from_submission_datasets() if "--resume-from-submission" in sys.argv else run_partition_pipeline()
     print(json.dumps(summary, indent=2))
 
 

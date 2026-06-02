@@ -21,16 +21,14 @@ DIRS = {
 
 FINAL_FILES = {
     "data": [
-        "complete_metadata.parquet",
-        "complete_metadata.csv.zip",
-        "complete_metadata_dedup.parquet",
-        "document_nlp_scores.parquet",
+        "clean_metadata.parquet",
+        "metadata_topics_sentiment.parquet",
     ],
     "reports": [
         "summary_statistics_final.xlsx",
     ],
     "memory": [
-        "complete_metadata_data_dictionary.csv",
+        "submission_data_dictionary.csv",
         "metadata_export_manifest.csv",
         "run_summary.json",
     ],
@@ -142,7 +140,7 @@ def curate() -> None:
                 "",
                 "This directory is the submission-facing output tree for the partition-aware TDM metadata analysis.",
                 "",
-                "- `data/`: full row-level parquet/CSV exports and compact document NLP scores.",
+                "- `data/`: two row-level parquet exports: cleaned metadata and normalized topic/sentiment features.",
                 "- `csv/`: compact audit, summary, topic, and sentiment tables used by the notebook/report.",
                 "- `reports/`: professor-facing workbook, markdown report, and figures. No PDF report is kept.",
                 "- `memory/`: run summary, validation, data dictionary, partition manifest, and processing notes.",

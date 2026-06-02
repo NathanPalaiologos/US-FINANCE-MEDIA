@@ -48,23 +48,23 @@ $env:PYTHONIOENCODING='utf-8'
 python scripts\partition_pipeline.py
 ```
 
-Create the raw-first EDA workbook:
-
-```powershell
-python scripts\build_metadata_eda_notebook.py
-```
-
 Curate the output tree and remove intermediate clutter:
 
 ```powershell
 python scripts\curate_deliverables.py
 ```
 
+Create the raw-first EDA workbook after curation so it lands in the final notebook directory:
+
+```powershell
+python scripts\build_metadata_eda_notebook.py
+```
+
 ## Curated Output
 
 The useful deliverables live under `analysis/deliverable/`:
 
-- `data/`: full row-level parquet/CSV exports and compact document NLP scores.
+- `data/`: two row-level parquet exports: cleaned metadata and normalized topic/sentiment features.
 - `csv/`: compact summary and audit tables.
 - `reports/`: summary workbook, markdown report, and figures. No PDF report is kept.
 - `memory/`: run summary, validation, data dictionary, manifest, and processing notes.
@@ -74,7 +74,8 @@ The useful deliverables live under `analysis/deliverable/`:
 
 - Topic and sentiment analysis are metadata/title based.
 - The raw-first notebook now builds grouped word clouds from the full English corpus with usable metadata text, while NMF and LDA topic models still fit on a bounded metadata sample for runtime reasons.
-- The main NLP text is `Title + Subject Terms + Class Terms`; title-only sensitivity scores are stored in the full tidy export.
+- The submission data layer is split into `clean_metadata.parquet` and `metadata_topics_sentiment.parquet`, both keyed by `goid`.
+- The main NLP text is `Title + Subject Terms + Class Terms`; title-only sensitivity scores are stored in the topic/sentiment feature export.
 - Loughran-McDonald sentiment uses the official SRAF/Notre Dame dictionary source.
 - Fuzzy publication alias matches are audit suggestions only.
 - The saved manifest records 955,690 rows for the 2013-2026 trade-journal partition, while the local export contains 955,594 rows.
